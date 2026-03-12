@@ -1,0 +1,6 @@
+*.json
+*.pkl
+*.log
+
+precomputed/
+__pycache__/
