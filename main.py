@@ -86,19 +86,18 @@ def main():
         # # BLIP captions only have to be computed when BLIP model or BLIP prompt changes.
         caption_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
         if args.blip_prompt != 'prompts.blip_prompt':
-            preload_dict['captions'] = os.path.join('precomputed', caption_load_str + f'_captions_{args.blip_prompt.split(".")[-1]}.pkl')
+            preload_dict['captions'] = os.path.join('precomputed', caption_load_str + f'{args.exp_name}_captions_{args.blip_prompt.split(".")[-1]}.pkl')
         else:
-            preload_dict['captions'] = os.path.join('precomputed', caption_load_str + '_captions.pkl')
+            preload_dict['captions'] = os.path.join('precomputed', caption_load_str + f'{args.exp_name}_captions.pkl')
             
     if 'mods' in args.preload:
         # # LLM-based caption modifications have to be queried only when BLIP model or BLIP prompt changes.
         mod_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
-        preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'_mods_{args.llm_prompt.split(".")[-1]}.json')
+        preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'{args.exp_name}_mods_{args.llm_prompt.split(".")[-1]}.json')
     
     if args.split == 'test':
-        preload_dict['test'] = preload_str + f'{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'
+        preload_dict['test'] = preload_str + f'{args.exp_name}_{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'
     
-            
     ### Load CLIP model, BLIP model & Preprocessing.    
     print(f'Loading CLIP {args.clip}... ', end='')
           
