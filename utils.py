@@ -161,8 +161,8 @@ def generate_predictions(
                         input_device = blip_model.device
                 elif hasattr(blip_model, 'device'):
                     input_device = blip_model.device
-                inputs = inputs.to(input_device)
-                out = blip_model.generate(**inputs, max_new_tokens=50)
+                inputs = inputs.to(input_device, torch.float16)
+                out = blip_model.generate(**inputs, max_new_tokens=512)
                 caption = blip_processor.decode(out[0], skip_special_tokens=True).strip()
                 captions.append(caption)
             all_captions.extend(captions)
@@ -185,6 +185,8 @@ def generate_predictions(
     ### Modify Captions using LLM.
     if preload_dict['mods'] is None or not os.path.exists(preload_dict['mods']):
         modified_captions = []
+        positive_captions = []
+        negative_captions = []
         base_prompt = eval(args.llm_prompt)
         for i in tqdm.trange(len(all_captions), position=1, desc=f'Modifying captions with LLM...', leave=False):
             instruction = relative_captions[i]
@@ -196,32 +198,41 @@ def generate_predictions(
 
             ## extract edited description
             resp = resp.split('\n')
-            description = ""
-            aug = False
-            for line in resp:                    
-                if line.strip().startswith('Edited Description:'):
-                    description = line.split(':')[1].strip()
-                    if description == "":
-                        modified_captions.append(relative_captions[i])
-                    else:
-                        modified_captions.append(description)
-                    aug = True
-                    break
-            if not aug:
-                modified_captions.append(relative_captions[i])   
+            description = relative_captions[i]
+            pos_desc = ""
+            neg_desc = ""
+            for line in resp:
+                stripped_line = line.strip()
+                if stripped_line.startswith('Edited Description:'):
+                    candidate = stripped_line.split(':', 1)[1].strip()
+                    if candidate != "":
+                        description = candidate
+                if stripped_line.startswith('Positive:') and pos_desc == "":
+                    pos_desc = stripped_line.split(':', 1)[1].strip()
+                if stripped_line.startswith('Negative:') and neg_desc == "":
+                    neg_desc = stripped_line.split(':', 1)[1].strip()
+
+            # Keep all caption streams strictly 1:1 with input examples.
+            modified_captions.append(description)
+            positive_captions.append(pos_desc)
+            negative_captions.append(neg_desc)
                 
         if preload_dict['mods'] is not None:
-            dump_dict = {'base_caption':all_captions, 'instruction':relative_captions, 'modified_captions': modified_captions}
+            dump_dict = {'base_caption':all_captions, 'instruction':relative_captions, 'modified_captions': modified_captions, 'positive_captions': positive_captions, 'negative_captions': negative_captions}
             json.dump(dump_dict, open(preload_dict['mods'], 'w'), indent=6)
     else:
         print(f'Loading precomputed caption modifiers from {preload_dict["mods"]}!')
         modified_captions = json.load(open(preload_dict['mods'], 'r'))['modified_captions']
+        positive_captions = json.load(open(preload_dict['mods'], 'r'))['positive_captions']
+        negative_captions = json.load(open(preload_dict['mods'], 'r'))['negative_captions']
                  
     ### Perform text-to-image retrieval based on the modified captions.
-    predicted_features = text_encoding(device, clip_model, modified_captions, batch_size=batch_size, mode=args.retrieval)   
+    predicted_features, positive_features, negative_features = text_encoding(device, clip_model, modified_captions, positive_captions, negative_captions, batch_size=batch_size, mode=args.retrieval)   
 
     return {
         'predicted_features': predicted_features, 
+        'positive_features': positive_features,
+        'negative_features': negative_features,
         'target_names': target_names, 
         'targets': gt_img_ids,
         'reference_names': reference_names,
@@ -319,6 +330,8 @@ def evaluate_genecis(device: torch.device, args: argparse.Namespace, clip_model:
                 captions.append(caption)
             
             modified_captions = []
+            pos_captions = []
+            neg_captions = []
             base_prompt = eval(args.llm_prompt)
 
             # LLM Caption Updates
@@ -369,25 +382,40 @@ def evaluate_genecis(device: torch.device, args: argparse.Namespace, clip_model:
         return meters
     
     
-def text_encoding(device, clip_model, input_captions, batch_size=32, mode='default'):
+def text_encoding(device, clip_model, input_captions, positive_captions, negative_captions, batch_size=32, mode='default'):
     n_iter = int(np.ceil(len(input_captions)/batch_size))
     predicted_features = []
+    positive_features = []
+    negative_features = []
         
     for i in tqdm.trange(n_iter, position=0, desc='Encoding captions...'):
         captions_to_use = input_captions[i*batch_size:(i+1)*batch_size]
+        positive_captions_to_use = positive_captions[i*batch_size:(i+1)*batch_size]
+        negative_captions_to_use = negative_captions[i*batch_size:(i+1)*batch_size]
         
         if hasattr(clip_model, 'tokenizer'):
             tokenized_input_captions = clip_model.tokenizer(captions_to_use, context_length=77).to(device)
+            tokenized_positive_captions = clip_model.tokenizer(positive_captions_to_use, context_length=77).to(device)
+            tokenized_negative_captions = clip_model.tokenizer(negative_captions_to_use, context_length=77).to(device)
         else:
             tokenized_input_captions = clip.tokenize(captions_to_use, context_length=77, truncate=True).to(device)
+            tokenized_positive_captions = clip.tokenize(positive_captions_to_use, context_length=77, truncate=True).to(device)
+            tokenized_negative_captions = clip.tokenize(negative_captions_to_use, context_length=77, truncate=True).to(device)
         # input_captions = [f"a photo of $ that {caption}" for caption in relative_captions]
         #clip_text_features = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens)
         clip_text_features = clip_model.encode_text(tokenized_input_captions)
+        clip_positive_features = clip_model.encode_text(tokenized_positive_captions)
+        clip_negative_features = clip_model.encode_text(tokenized_negative_captions)
         predicted_features.append(clip_text_features)
-    predicted_features = torch.vstack(predicted_features)        
-        
-    return torch.nn.functional.normalize(predicted_features, dim=-1)
-    
+        positive_features.append(clip_positive_features)
+        negative_features.append(clip_negative_features)
+
+    predicted_features = torch.nn.functional.normalize(torch.vstack(predicted_features), dim=-1)
+    positive_features = torch.nn.functional.normalize(torch.vstack(positive_features), dim=-1)
+    negative_features = torch.nn.functional.normalize(torch.vstack(negative_features), dim=-1)
+
+    return predicted_features, positive_features, negative_features
+
 
 prompt_ensemble = [
     'A bad photo of a {}',

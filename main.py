@@ -73,7 +73,7 @@ def main():
 
     ### Argument Checks.
     preload_dict = {key: None for key in ['img_features', 'captions', 'mods']}
-    preload_str = f'{args.dataset}_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
+    preload_str = f'{args.exp_name}_{args.dataset}_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
         
     if len(args.preload):
         os.makedirs('precomputed', exist_ok=True)    

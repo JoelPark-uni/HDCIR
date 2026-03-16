@@ -12,6 +12,8 @@ import tqdm
 def fiq(
     device: torch.device,
     predicted_features: torch.Tensor,
+    positive_features: torch.Tensor,
+    negative_features: torch.Tensor,
     target_names: List,
     index_features: torch.Tensor,
     index_names: List,
@@ -25,10 +27,15 @@ def fiq(
     # Move the features to the device
     index_features = torch.nn.functional.normalize(index_features).to(device)
     predicted_features = torch.nn.functional.normalize(predicted_features).to(device)
+    positive_features = torch.nn.functional.normalize(positive_features).to(device)
+    negative_features = torch.nn.functional.normalize(negative_features).to(device)
 
-    # Compute the distances
-    distances = 1 - predicted_features @ index_features.T
-    sorted_indices = torch.argsort(distances, dim=-1).cpu()
+    # Compute the Retrieval Score
+    similarities = predicted_features @ index_features.T
+    positive_similarities = positive_features @ index_features.T
+    negative_similarities = negative_features @ index_features.T
+    retrieval_score = similarities + positive_similarities - 0.1 * negative_similarities
+    sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
     # Check if the target names are in the top 10 and top 50
@@ -49,7 +56,9 @@ def fiq(
 @torch.no_grad()
 def cirr(
     device: torch.device, 
-    predicted_features: torch.Tensor, 
+    predicted_features: torch.Tensor,
+    positive_features: torch.Tensor,
+    negative_features: torch.Tensor, 
     reference_names: List, 
     targets: Union[np.ndarray,List], 
     target_names: List, 
@@ -67,13 +76,23 @@ def cirr(
     # Put on device.
     index_features = index_features.to(device)
     predicted_features = predicted_features.to(device)
+    positive_features = positive_features.to(device)
+    negative_features = negative_features.to(device)
 
-    # Compute the distances and sort the results
-    distances = 1 - predicted_features @ index_features.T
-    if distances.ndim == 3:
+    # Compute the Retrieval Score
+    similarities = predicted_features @ index_features.T
+    if similarities.ndim == 3:
         # If there are multiple features per instance, we average.
-        distances = distances.mean(dim=1)
-    sorted_indices = torch.argsort(distances, dim=-1).cpu()
+        similarities = similarities.mean(dim=1)
+    positive_similarities = positive_features @ index_features.T
+    if positive_similarities.ndim == 3:
+        positive_similarities = positive_similarities.mean(dim=1)
+    negative_similarities = negative_features @ index_features.T
+    if negative_similarities.ndim == 3:
+        negative_similarities = negative_similarities.mean(dim=1)
+    retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
+
+    sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
     # Delete the reference image from the results
@@ -126,6 +145,8 @@ def cirr(
 def circo(
     device: torch.device, 
     predicted_features: torch.Tensor, 
+    positive_features: torch.Tensor,
+    negative_features: torch.Tensor,
     targets: Union[np.ndarray,List], 
     target_names: List, 
     index_features: torch.Tensor, 
@@ -147,11 +168,20 @@ def circo(
     ### Compute Test Submission in case of test split.
     if split == 'test':
         print('Generating test submission file!')
-        similarity = predicted_features @ index_features.T
-        if similarity.ndim == 3:
+        # Compute the Retrieval Score
+        similarities = predicted_features @ index_features.T
+        if similarities.ndim == 3:
             # If there are multiple features per instance, we average.
-            similarity = similarity.mean(dim=1)                    
-        sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
+            similarities = similarities.mean(dim=1)
+        positive_similarities = positive_features @ index_features.T
+        if positive_similarities.ndim == 3:
+            positive_similarities = positive_similarities.mean(dim=1)
+        negative_similarities = negative_features @ index_features.T
+        if negative_similarities.ndim == 3:
+            negative_similarities = negative_similarities.mean(dim=1)
+        retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
+
+        sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
         sorted_index_names = np.array(index_names)[sorted_indices]
         # Return prediction dict to submit.
         queryid_to_retrieved_images = {
