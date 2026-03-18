@@ -243,7 +243,9 @@ Negative: yellow color, hawaiian floral print, revealing chest
 #############################
 ###### BLIP PROMPT ##########
 #############################
-blip_prompt = 'Question: Describe the image in complete detail. You must especially focus on all the objects in the image.\nAnswer: '
+blip_prompt = 'Describe the image in complete detail. You must especially focus on all the objects in the image'
+
+
 
 
 structural_modifier_prompt_fashion = '''
