@@ -12,6 +12,7 @@ import torch
 import tqdm
 
 import data_utils
+from encoder import HDlm
 import prompts
 
 if torch.cuda.is_available():
@@ -247,7 +248,16 @@ def generate_predictions(
         negative_captions = json.load(open(preload_dict['mods'], 'r'))['negative_captions']
                  
     ### Perform text-to-image retrieval based on the modified captions.
-    predicted_features, positive_features, negative_features = text_encoding(device, clip_model, modified_captions, positive_captions, negative_captions, batch_size=batch_size, mode=args.retrieval)   
+    predicted_features, positive_features, negative_features = text_encoding(
+        device,
+        clip_model,
+        modified_captions,
+        positive_captions,
+        negative_captions,
+        batch_size=batch_size,
+        mode=args.retrieval,
+        hdc_encoder=kwargs.get('hd_encoder', None),
+    )
 
     return {
         'predicted_features': predicted_features, 
@@ -402,7 +412,50 @@ def evaluate_genecis(device: torch.device, args: argparse.Namespace, clip_model:
         return meters
 
     
-def text_encoding(device, clip_model, input_captions, positive_captions, negative_captions, batch_size=32, mode='default'):
+def _tokenize_captions(clip_model, captions: List[str], device: torch.device) -> torch.Tensor:
+    if hasattr(clip_model, 'tokenizer'):
+        return clip_model.tokenizer(captions, context_length=77).to(device)
+    return clip.tokenize(captions, context_length=77, truncate=True).to(device)
+
+
+def _split_segments(caption: str) -> List[str]:
+    parts = [part.strip() for part in caption.split(',') if part.strip()]
+    if len(parts) == 0:
+        clean_caption = caption.strip()
+        return [clean_caption] if clean_caption else ['']
+    return parts
+
+
+@torch.no_grad()
+def segment_encoding(
+    device: torch.device,
+    clip_model,
+    captions: List[str],
+    hdc_encoder: HDlm,
+    segment_batch_size: int = 32,
+) -> torch.Tensor:
+    segment_hv_features = []
+
+    for caption in tqdm.tqdm(captions, desc='Segment HDC encoding', position=0, leave=False):
+        segments = _split_segments(caption)
+        segment_clip_features = []
+
+        for start_idx in range(0, len(segments), segment_batch_size):
+            end_idx = min(start_idx + segment_batch_size, len(segments))
+            segment_batch = segments[start_idx:end_idx]
+            tokenized = _tokenize_captions(clip_model, segment_batch, device)
+            clip_feats = clip_model.encode_text(tokenized)
+            clip_feats = torch.nn.functional.normalize(clip_feats, dim=-1)
+            segment_clip_features.append(clip_feats)
+
+        segment_clip_features = torch.vstack(segment_clip_features)
+        segment_hv = hdc_encoder.segment_bundle(segment_clip_features)
+        segment_hv_features.append(segment_hv.cpu())
+
+    return torch.vstack(segment_hv_features)
+
+
+def text_encoding(device, clip_model, input_captions, positive_captions, negative_captions, batch_size=32, mode='default', hdc_encoder: Optional[HDlm] = None):
     n_iter = int(np.ceil(len(input_captions)/batch_size))
     predicted_features = []
     positive_features = []
@@ -413,26 +466,27 @@ def text_encoding(device, clip_model, input_captions, positive_captions, negativ
         positive_captions_to_use = positive_captions[i*batch_size:(i+1)*batch_size]
         negative_captions_to_use = negative_captions[i*batch_size:(i+1)*batch_size]
         
-        if hasattr(clip_model, 'tokenizer'):
-            tokenized_input_captions = clip_model.tokenizer(captions_to_use, context_length=77).to(device)
-            tokenized_positive_captions = clip_model.tokenizer(positive_captions_to_use, context_length=77).to(device)
-            tokenized_negative_captions = clip_model.tokenizer(negative_captions_to_use, context_length=77).to(device)
-        else:
-            tokenized_input_captions = clip.tokenize(captions_to_use, context_length=77, truncate=True).to(device)
-            tokenized_positive_captions = clip.tokenize(positive_captions_to_use, context_length=77, truncate=True).to(device)
-            tokenized_negative_captions = clip.tokenize(negative_captions_to_use, context_length=77, truncate=True).to(device)
+        tokenized_input_captions = _tokenize_captions(clip_model, captions_to_use, device)
         # input_captions = [f"a photo of $ that {caption}" for caption in relative_captions]
         #clip_text_features = encode_with_pseudo_tokens(clip_model, tokenized_input_captions, batch_tokens)
         clip_text_features = clip_model.encode_text(tokenized_input_captions)
-        clip_positive_features = clip_model.encode_text(tokenized_positive_captions)
-        clip_negative_features = clip_model.encode_text(tokenized_negative_captions)
         predicted_features.append(clip_text_features)
-        positive_features.append(clip_positive_features)
-        negative_features.append(clip_negative_features)
+        if hdc_encoder is None:
+            tokenized_positive_captions = _tokenize_captions(clip_model, positive_captions_to_use, device)
+            tokenized_negative_captions = _tokenize_captions(clip_model, negative_captions_to_use, device)
+            clip_positive_features = clip_model.encode_text(tokenized_positive_captions)
+            clip_negative_features = clip_model.encode_text(tokenized_negative_captions)
+            positive_features.append(clip_positive_features)
+            negative_features.append(clip_negative_features)
 
     predicted_features = torch.nn.functional.normalize(torch.vstack(predicted_features), dim=-1)
-    positive_features = torch.nn.functional.normalize(torch.vstack(positive_features), dim=-1)
-    negative_features = torch.nn.functional.normalize(torch.vstack(negative_features), dim=-1)
+
+    if hdc_encoder is None:
+        positive_features = torch.nn.functional.normalize(torch.vstack(positive_features), dim=-1)
+        negative_features = torch.nn.functional.normalize(torch.vstack(negative_features), dim=-1)
+    else:
+        positive_features = segment_encoding(device, clip_model, positive_captions, hdc_encoder)
+        negative_features = segment_encoding(device, clip_model, negative_captions, hdc_encoder)
 
     return predicted_features, positive_features, negative_features
 

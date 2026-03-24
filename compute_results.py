@@ -1,11 +1,44 @@
 import json
 import os
-from typing import List, Dict, Union
+from typing import List, Dict, Optional, Union
 
 import numpy as np
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
+import torchhd
 import tqdm
+
+
+def _hd_cosine_similarity_matrix(
+    query_hv: torch.Tensor,
+    index_hv: torch.Tensor,
+    device: torch.device,
+    query_chunk_size: int = 32,
+    index_chunk_size: int = 4096,
+) -> torch.Tensor:
+    """Compute pairwise cosine similarity using torchhd.cosine_similarity with chunking to avoid OOM."""
+    output_rows = []
+
+    for q_start in range(0, query_hv.shape[0], query_chunk_size):
+        q_end = min(q_start + query_chunk_size, query_hv.shape[0])
+        q_chunk = query_hv[q_start:q_end].to(device)
+        row_chunks = []
+
+        for i_start in range(0, index_hv.shape[0], index_chunk_size):
+            i_end = min(i_start + index_chunk_size, index_hv.shape[0])
+            i_chunk = index_hv[i_start:i_end].to(device)
+            i_chunk = torchhd.MAPTensor(i_chunk)
+
+            chunk_sims = []
+            for q_vec in q_chunk:
+                q_vec = torchhd.MAPTensor(q_vec)
+                sims = torchhd.cosine_similarity(q_vec, i_chunk)
+                chunk_sims.append(sims.reshape(-1))
+            row_chunks.append(torch.stack(chunk_sims, dim=0).cpu())
+
+        output_rows.append(torch.cat(row_chunks, dim=-1))
+
+    return torch.cat(output_rows, dim=0)
 
 
 @torch.no_grad()
@@ -18,6 +51,7 @@ def fiq(
     index_features: torch.Tensor,
     index_names: List,
     split: str='val',
+    hdc_index_features: Optional[torch.Tensor] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
@@ -27,13 +61,19 @@ def fiq(
     # Move the features to the device
     index_features = torch.nn.functional.normalize(index_features).to(device)
     predicted_features = torch.nn.functional.normalize(predicted_features).to(device)
-    positive_features = torch.nn.functional.normalize(positive_features).to(device)
-    negative_features = torch.nn.functional.normalize(negative_features).to(device)
 
     # Compute the Retrieval Score
-    similarities = predicted_features @ index_features.T
-    positive_similarities = positive_features @ index_features.T
-    negative_similarities = negative_features @ index_features.T
+    similarities = (predicted_features @ index_features.T).cpu()
+
+    if hdc_index_features is None:
+        positive_features = torch.nn.functional.normalize(positive_features).to(device)
+        negative_features = torch.nn.functional.normalize(negative_features).to(device)
+        positive_similarities = (positive_features @ index_features.T).cpu()
+        negative_similarities = (negative_features @ index_features.T).cpu()
+    else:
+        positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
+        negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
+
     retrieval_score = similarities + positive_similarities - 0.1 * negative_similarities
     sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
@@ -67,6 +107,7 @@ def cirr(
     query_ids: Union[np.ndarray,List],
     preload_dict: Dict[str, Union[str, None]],
     split: str='val',    
+    hdc_index_features: Optional[torch.Tensor] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
@@ -76,20 +117,31 @@ def cirr(
     # Put on device.
     index_features = index_features.to(device)
     predicted_features = predicted_features.to(device)
-    positive_features = positive_features.to(device)
-    negative_features = negative_features.to(device)
+    positive_features = positive_features
+    negative_features = negative_features
 
     # Compute the Retrieval Score
     similarities = predicted_features @ index_features.T
     if similarities.ndim == 3:
         # If there are multiple features per instance, we average.
         similarities = similarities.mean(dim=1)
-    positive_similarities = positive_features @ index_features.T
-    if positive_similarities.ndim == 3:
-        positive_similarities = positive_similarities.mean(dim=1)
-    negative_similarities = negative_features @ index_features.T
-    if negative_similarities.ndim == 3:
-        negative_similarities = negative_similarities.mean(dim=1)
+    similarities = similarities.cpu()
+
+    if hdc_index_features is None:
+        positive_features = positive_features.to(device)
+        negative_features = negative_features.to(device)
+        positive_similarities = positive_features @ index_features.T
+        if positive_similarities.ndim == 3:
+            positive_similarities = positive_similarities.mean(dim=1)
+        negative_similarities = negative_features @ index_features.T
+        if negative_similarities.ndim == 3:
+            negative_similarities = negative_similarities.mean(dim=1)
+        positive_similarities = positive_similarities.cpu()
+        negative_similarities = negative_similarities.cpu()
+    else:
+        positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
+        negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
+
     retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
 
     sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
@@ -154,6 +206,7 @@ def circo(
     query_ids: Union[np.ndarray,List],
     preload_dict: Dict[str, Union[str, None]],
     split: str='val',
+    hdc_index_features: Optional[torch.Tensor] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
@@ -173,13 +226,18 @@ def circo(
         if similarities.ndim == 3:
             # If there are multiple features per instance, we average.
             similarities = similarities.mean(dim=1)
-        positive_similarities = positive_features @ index_features.T
-        if positive_similarities.ndim == 3:
-            positive_similarities = positive_similarities.mean(dim=1)
-        negative_similarities = negative_features @ index_features.T
-        if negative_similarities.ndim == 3:
-            negative_similarities = negative_similarities.mean(dim=1)
-        retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
+        if hdc_index_features is None:
+            positive_similarities = positive_features @ index_features.T
+            if positive_similarities.ndim == 3:
+                positive_similarities = positive_similarities.mean(dim=1)
+            negative_similarities = negative_features @ index_features.T
+            if negative_similarities.ndim == 3:
+                negative_similarities = negative_similarities.mean(dim=1)
+            retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
+        else:
+            positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
+            negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
+            retrieval_score = similarities.cpu() + 0.7 * positive_similarities - 0.2 * negative_similarities
 
         sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
         sorted_index_names = np.array(index_names)[sorted_indices]
