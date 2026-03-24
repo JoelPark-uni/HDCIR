@@ -84,8 +84,8 @@ def main():
 
 
     ### Argument Checks.
-    preload_dict = {key: None for key in ['img_features', 'captions', 'mods', 'hd_index_features']}
-    preload_str = f'{args.exp_name}_{args.dataset}_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
+    preload_dict = {key: None for key in ['img_features', 'captions', 'mods']}
+    preload_str = f'{args.dataset}_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
         
     if len(args.preload):
         os.makedirs('precomputed', exist_ok=True)    
@@ -96,7 +96,7 @@ def main():
     
     if 'captions' in args.preload:
         # # BLIP captions only have to be computed when BLIP model or BLIP prompt changes.
-        caption_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
+        caption_load_str = f'{args.dataset}_cirevl_{args.blip}_{args.split}'.replace('/', '-')    
         if args.blip_prompt != 'prompts.blip_prompt':
             preload_dict['captions'] = os.path.join('precomputed', caption_load_str + f'{args.exp_name}_captions_{args.blip_prompt.split(".")[-1]}.pkl')
         else:
@@ -105,13 +105,7 @@ def main():
     if 'mods' in args.preload:
         # # LLM-based caption modifications have to be queried only when BLIP model or BLIP prompt changes.
         mod_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
-        preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'{args.exp_name}_mods_{args.llm_prompt.split(".")[-1]}.json')
-
-    if args.use_hdc and len(args.preload):
-        preload_dict['hd_index_features'] = os.path.join(
-            'precomputed',
-            preload_str + f'_hd_index_features_HD{args.HD_DIM}.pt'
-        )
+        preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'_mods_{args.llm_prompt.split(".")[-1]}.json')
     
     if args.split == 'test':
         preload_dict['test'] = preload_str + f'{args.exp_name}_{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'

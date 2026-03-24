@@ -190,53 +190,29 @@ def generate_predictions(
         positive_captions = []
         negative_captions = []
         base_prompt = eval(args.llm_prompt)
-        llm_batch_size = max(1, args.llm_batch_size)
-        prompts_to_query = []
-        for i in range(len(all_captions)):
+        for i in tqdm.trange(len(all_captions), position=1, desc=f'Modifying captions with LLM...', leave=False):
             instruction = relative_captions[i]
             img_caption = all_captions[i]
             final_prompt = base_prompt + '\n' + "Image Content: " + img_caption
-            final_prompt = final_prompt + '\n' + 'Instruction: ' + instruction
-            prompts_to_query.append(final_prompt)
+            final_prompt = final_prompt + '\n' + 'Instruction: '+ instruction
+            resp = openai_api.openai_completion(final_prompt)
+            #resp = llama_pipeline(final_prompt,temperature=0.6,top_p=0.9,max_length=800)[0]['generated_text']
 
-        for start_idx in tqdm.trange(0, len(prompts_to_query), llm_batch_size,
-                                     position=1, desc=f'Modifying captions with LLM...', leave=False):
-            end_idx = min(start_idx + llm_batch_size, len(prompts_to_query))
-            batch_prompts = prompts_to_query[start_idx:end_idx]
-
-            try:
-                batch_responses = openai_api.openai_completion_batch(batch_prompts, max_tokens=200)
-            except Exception:
-                # Fallback path for environments with older openai_api implementation.
-                batch_responses = [openai_api.openai_completion(p, max_tokens=200) for p in batch_prompts]
-
-            for local_idx, resp_text in enumerate(batch_responses):
-                global_idx = start_idx + local_idx
-                resp_text = resp_text.strip()
-                description = relative_captions[global_idx]
-                pos_desc = ""
-                neg_desc = ""
-
-                # 정규식을 이용해 각 섹션의 텍스트를 안전하게 추출 (re.DOTALL로 줄바꿈 무시)
-                pos_match = re.search(r'Positive:\s*([^\n]*)', resp_text)
-                neg_match = re.search(r'Negative:\s*([^\n]*)', resp_text)
-                desc_match = re.search(r'Edited Description:\s*([^\n]*)', resp_text)
-
-                if pos_match:
-                    pos_desc = pos_match.group(1).strip()
-                if neg_match:
-                    neg_desc = neg_match.group(1).strip()
-                if desc_match:
-                    # 캡션이 잘렸더라도 최소한 추출된 부분까지는 가져옴
-                    candidate = desc_match.group(1).strip()
-                    if candidate:
-                        # 모델이 환각으로 이상한 특수문자나 줄바꿈을 넣었을 경우를 대비해 한 줄로 정리
-                        description = " ".join(candidate.split())
-
-                # Keep all caption streams strictly 1:1 with input examples.
-                modified_captions.append(description)
-                positive_captions.append(pos_desc)
-                negative_captions.append(neg_desc)
+            ## extract edited description
+            resp = resp.split('\n')
+            description = ""
+            aug = False
+            for line in resp:                    
+                if line.strip().startswith('Edited Description:'):
+                    description = line.split(':')[1].strip()
+                    if description == "":
+                        modified_captions.append(relative_captions[i])
+                    else:
+                        modified_captions.append(description)
+                    aug = True
+                    break
+            if not aug:
+                modified_captions.append(relative_captions[i])   
                 
         if preload_dict['mods'] is not None:
             dump_dict = {'base_caption':all_captions, 'instruction':relative_captions, 'modified_captions': modified_captions, 'positive_captions': positive_captions, 'negative_captions': negative_captions}

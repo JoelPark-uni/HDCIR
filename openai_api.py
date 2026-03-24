@@ -165,3 +165,19 @@ def openai_completion_batch(
     _ = engine, temperature, api_key
     capped_tokens = max(1, min(int(max_tokens), 1024))
     return _LOCAL_PHI3.completion_batch(prompts=prompts, max_new_tokens=capped_tokens)
+
+
+@retry(wait=wait_random_exponential(min=1, max=10), stop=stop_after_attempt(3))
+def openai_completion_batch(
+    prompts: list[str],
+    engine: str = "gpt-3.5-turbo",
+    max_tokens: int = 700,
+    temperature: float = 0,
+    api_key: Optional[str] = None,
+):
+    """
+    Batched drop-in replacement for OpenAI-like completion calls.
+    """
+    _ = engine, temperature, api_key
+    capped_tokens = max(1, min(int(max_tokens), 1024))
+    return _LOCAL_PHI3.completion_batch(prompts=prompts, max_new_tokens=capped_tokens)
