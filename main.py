@@ -51,6 +51,9 @@ def main():
     available_prompts = [f'prompts.{x}' for x in prompts.__dict__.keys() if '__' not in x]
     parser.add_argument("--llm_prompt", default='prompts.simple_modifier_prompt', type=str, choices=available_prompts,
                         help='Denotes the base prompt to use to probe the LLM. Has to be available in prompts.py')
+
+    parser.add_argument("--llm_batch_size", default=16, type=int,
+                        help='Batch size to use when generating LLM-based caption modifications. Default is 8, but can be set to 1 for lower GPU memory usage.')
     #################################################################################################################
 
     parser.add_argument("--weight-path", type=str, default='',

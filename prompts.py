@@ -321,3 +321,45 @@ Edited Description: the dress is a black and green dress with a sleeveless bodic
 Positive: black and green dress, sleeveless bodice, flared skirt
 Negative: yellow color, hawaiian floral print, revealing chest
 '''
+
+
+easy_modifier_prompt_fashion = '''
+I have an image of a fashion item. Given an instruction to edit the image, you must strictly identify the positive and negative attributes FIRST, and then generate a concise description of the edited image.
+
+CRITICAL RULE FOR NEGATION:
+If the instruction implies removing an attribute, DO NOT put negative words in the Positive list. Instead, extract the base visual noun and put it strictly in the Negative list.
+
+Follow these steps strictly:
+1. Positive: Identify parts that will appear in the edited image (newly added or kept from the original). Use simple noun phrases separated by commas. (Absolutely no negative words like 'no', 'without', 'less').
+2. Negative: Identify parts that no longer appear (removed or replaced from the original). Use simple noun phrases separated by commas.
+3. Edited Description: Generate a short, factual description of the edited item using ONLY the positive attributes. Avoid adding imaginary things not mentioned in the instruction.
+
+I will put my image content beginning with “Image Content:”. The instruction I provide will begin with “Instruction:".
+Each time generate one Positive, one Negative, and one Edited Description only.
+
+Examples:
+
+Image Content: the man is wearing a red t - shirt
+Instruction: is solid white and is a lighter color
+Positive: solid white t-shirt, lighter color
+Negative: red t-shirt
+Edited Description: The man is wearing a solid white t-shirt.
+
+Image Content: the man is wearing a black polo shirt
+Instruction: is less formal and is gray with no collar
+Positive: gray polo shirt
+Negative: black polo shirt, collar, formal style
+Edited Description: The man is wearing a gray polo shirt.
+
+Image Content: a woman in a blue and white dress
+Instruction: its solid blue with higher neckline
+Positive: solid blue dress, higher neckline
+Negative: white color, lower neckline
+Edited Description: A woman in a solid blue dress with a higher neckline.
+
+Image Content: black and yellow hawaiian floral print dress
+Instruction: no vibrant colors and less revealing chest and more evening wear
+Positive: black evening wear dress
+Negative: yellow color, hawaiian floral print, vibrant colors, revealing chest
+Edited Description: A black evening wear dress.
+'''
