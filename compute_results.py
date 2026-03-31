@@ -52,6 +52,8 @@ def fiq(
     index_names: List,
     split: str='val',
     hdc_index_features: Optional[torch.Tensor] = None,
+    positive_sim_weights: Optional[List[float]] = None,
+    negative_sim_weights: Optional[List[float]] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
@@ -74,22 +76,38 @@ def fiq(
         positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
         negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
 
-    retrieval_score = similarities + positive_similarities - 0.1 * negative_similarities
-    sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
-    sorted_index_names = np.array(index_names)[sorted_indices]
+    pos_weights = positive_sim_weights if positive_sim_weights is not None else [1.0]
+    neg_weights = negative_sim_weights if negative_sim_weights is not None else [0.1]
 
-    # Check if the target names are in the top 10 and top 50
-    labels = torch.tensor(
-        sorted_index_names == np.repeat(np.array(target_names), len(index_names)).reshape(len(target_names), -1))
-    assert torch.equal(torch.sum(labels, dim=-1).int(), torch.ones(len(target_names)).int())
+    output_metrics: Dict[str, float] = {}
+    sweep_enabled = (len(pos_weights) > 1) or (len(neg_weights) > 1)
 
-    # Compute the metrics
-    output_metrics = {
-        'Recall@1': (torch.sum(labels[:, :1]) / len(labels)).item() * 100,
-        'Recall@5': (torch.sum(labels[:, :5]) / len(labels)).item() * 100,
-        'Recall@10': (torch.sum(labels[:, :10]) / len(labels)).item() * 100,
-        'Recall@50': (torch.sum(labels[:, :50]) / len(labels)).item() * 100
-    }
+    for pos_w in pos_weights:
+        for neg_w in neg_weights:
+            retrieval_score = similarities + float(pos_w) * positive_similarities - float(neg_w) * negative_similarities
+            sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
+            sorted_index_names = np.array(index_names)[sorted_indices]
+
+            # Check if the target names are in the top 10 and top 50
+            labels = torch.tensor(
+                sorted_index_names == np.repeat(np.array(target_names), len(index_names)).reshape(len(target_names), -1)
+            )
+            assert torch.equal(torch.sum(labels, dim=-1).int(), torch.ones(len(target_names)).int())
+
+            metrics = {
+                'Recall@1': (torch.sum(labels[:, :1]) / len(labels)).item() * 100,
+                'Recall@5': (torch.sum(labels[:, :5]) / len(labels)).item() * 100,
+                'Recall@10': (torch.sum(labels[:, :10]) / len(labels)).item() * 100,
+                'Recall@50': (torch.sum(labels[:, :50]) / len(labels)).item() * 100,
+            }
+
+            if sweep_enabled:
+                prefix = f'pos{pos_w:g}_neg{neg_w:g}_'
+                for metric_name, metric_value in metrics.items():
+                    output_metrics[prefix + metric_name] = metric_value
+            else:
+                output_metrics.update(metrics)
+
     return output_metrics
     
 

@@ -71,6 +71,10 @@ def main():
     # Text-to-Image Retrieval Arguments.
     parser.add_argument("--retrieval", type=str, default='default', choices=['default'],
                         help='Type of T2I Retrieval method.')
+    parser.add_argument("--positive-sim-weights", nargs='+', type=float, default=None,
+                        help='List of positive similarity weights for sweep in FIQ (e.g. 0.5 0.7 1.0).')
+    parser.add_argument("--negative-sim-weights", nargs='+', type=float, default=None,
+                        help='List of negative similarity weights for sweep in FIQ (e.g. 0.05 0.1 0.2).')
     args = parser.parse_args()
 
 
@@ -231,6 +235,8 @@ def main():
             'args': args, 'query_dataset': query_dataset, 'target_dataset': target_dataset, 'clip_model': clip_model, 
             'blip_model': blip_model, 'blip_processor': blip2_processor, 'preprocess': preprocess, 'device': device, 'split': args.split,
             'preload_dict': preload_dict,
+            'positive_sim_weights': args.positive_sim_weights,
+            'negative_sim_weights': args.negative_sim_weights,
         }    
         
         ### Compute Target Image Features
