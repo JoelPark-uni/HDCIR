@@ -52,13 +52,6 @@ def main():
     available_prompts = [f'prompts.{x}' for x in prompts.__dict__.keys() if '__' not in x]
     parser.add_argument("--llm_prompt", default='prompts.simple_modifier_prompt', type=str, choices=available_prompts,
                         help='Denotes the base prompt to use to probe the LLM. Has to be available in prompts.py')
-
-    parser.add_argument("--llm_batch_size", default=16, type=int,
-                        help='Batch size to use when generating LLM-based caption modifications. Default is 8, but can be set to 1 for lower GPU memory usage.')
-    parser.add_argument("--use_hdc", action='store_true',
-                        help='Use HDlm style encoder for positive/negative text features and HD cosine metric.')
-    parser.add_argument("--HD_DIM", default=10000, type=int,
-                        help='Hypervector dimension for HDlm encoder.')
     #################################################################################################################
 
     parser.add_argument("--weight-path", type=str, default='',
@@ -85,7 +78,7 @@ def main():
 
     ### Argument Checks.
     preload_dict = {key: None for key in ['img_features', 'captions', 'mods']}
-    preload_str = f'{args.dataset}_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
+    preload_str = f'{args.dataset}_cirevl_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
         
     if len(args.preload):
         os.makedirs('precomputed', exist_ok=True)    
@@ -107,6 +100,12 @@ def main():
         mod_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
         preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'_mods_{args.llm_prompt.split(".")[-1]}.json')
     
+    if args.use_hdc and len(args.preload):
+        preload_dict['hd_index_features'] = os.path.join(
+            'precomputed',
+            preload_str + f'_hd_index_features_HD{args.HD_DIM}.pt'
+        )
+
     if args.split == 'test':
         preload_dict['test'] = preload_str + f'{args.exp_name}_{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'
     
@@ -256,6 +255,26 @@ def main():
         elif args.use_hdc:
             print('Skipping HDC index encoding because index_features is not 2D for this dataset.')
 
+        if args.use_hdc and index_features.ndim == 2:
+            print(f'Preparing HDlm encoder (HD_DIM={args.HD_DIM}) and index hypervectors.')
+            hdc_encoder = HDlm(feature_dim=index_features.shape[-1], HD_DIM=args.HD_DIM, device='cpu')
+
+            if preload_dict['hd_index_features'] is not None and os.path.exists(preload_dict['hd_index_features']):
+                print(f'Loading precomputed HD index features from {preload_dict["hd_index_features"]}!')
+                loaded_data = torch.load(preload_dict['hd_index_features'], map_location='cpu')
+                hdc_index_features = loaded_data['features']
+                hdc_encoder.encoder = loaded_data['encoder']
+            else:
+                hdc_index_features = encode_index_features_hdc(index_features.cpu(), hdc_encoder, output_device='cpu')
+                if preload_dict['hd_index_features'] is not None:
+                    torch.save({
+                        'features': hdc_index_features.cpu(),
+                        'encoder': hdc_encoder.encoder.cpu()
+                    }, preload_dict['hd_index_features'])
+
+            input_kwargs.update({'hd_encoder': hdc_encoder, 'hdc_index_features': hdc_index_features.cpu()})
+        elif args.use_hdc:
+            print('Skipping HDC index encoding because index_features is not 2D for this dataset.')
             
         ### Compute Method-specific Query Features.
         # This part can be interchanged with any other method implementation.

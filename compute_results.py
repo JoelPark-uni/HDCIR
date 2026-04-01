@@ -1,12 +1,13 @@
 import json
 import os
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Union
 
 import numpy as np
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 import torchhd
 import tqdm
+from encoder import get_hd_similarity_matrix, encode_index_features_hdc
 
 
 def _hd_cosine_similarity_matrix(
@@ -51,42 +52,25 @@ def fiq(
     index_features: torch.Tensor,
     index_names: List,
     split: str='val',
-    hdc_index_features: Optional[torch.Tensor] = None,
-    positive_sim_weights: Optional[List[float]] = None,
-    negative_sim_weights: Optional[List[float]] = None,
     **kwargs
 ) -> Dict[str, float]:
     """
     Compute the retrieval metrics on the Fashion-IQ validation set fiven the dataset, pseudo tokens and reference names.
     Computes Recall@10 and Recall@50.
     """
-    # Move the features to the device
-    index_features = torch.nn.functional.normalize(index_features).to(device)
-    predicted_features = torch.nn.functional.normalize(predicted_features).to(device)
-
-    # Compute the Retrieval Score
-    similarities = (predicted_features @ index_features.T).cpu()
-
-    if hdc_index_features is None:
-        positive_features = torch.nn.functional.normalize(positive_features).to(device)
-        negative_features = torch.nn.functional.normalize(negative_features).to(device)
-        positive_similarities = (positive_features @ index_features.T).cpu()
-        negative_similarities = (negative_features @ index_features.T).cpu()
+    if hdc_index_features is not None:
+        hd_encoder = kwargs.get('hd_encoder')
+        predicted_hv = encode_index_features_hdc(predicted_features, hd_encoder, output_device=device)
+        similarities = get_hd_similarity_matrix(predicted_hv, hdc_index_features.to(device)).cpu()
     else:
-        positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
-        negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
+        # Move the features to the device
+        index_features = torch.nn.functional.normalize(index_features).to(device)
+        predicted_features = torch.nn.functional.normalize(predicted_features).to(device)
 
-    pos_weights = positive_sim_weights if positive_sim_weights is not None else [1.0]
-    neg_weights = negative_sim_weights if negative_sim_weights is not None else [0.1]
-
-    output_metrics: Dict[str, float] = {}
-    sweep_enabled = (len(pos_weights) > 1) or (len(neg_weights) > 1)
-
-    for pos_w in pos_weights:
-        for neg_w in neg_weights:
-            retrieval_score = similarities + float(pos_w) * positive_similarities - float(neg_w) * negative_similarities
-            sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
-            sorted_index_names = np.array(index_names)[sorted_indices]
+    # Compute the distances
+    distances = 1 - predicted_features @ index_features.T
+    sorted_indices = torch.argsort(distances, dim=-1).cpu()
+    sorted_index_names = np.array(index_names)[sorted_indices]
 
             # Check if the target names are in the top 10 and top 50
             labels = torch.tensor(
@@ -135,34 +119,13 @@ def cirr(
     # Put on device.
     index_features = index_features.to(device)
     predicted_features = predicted_features.to(device)
-    positive_features = positive_features
-    negative_features = negative_features
 
-    # Compute the Retrieval Score
-    similarities = predicted_features @ index_features.T
-    if similarities.ndim == 3:
+    # Compute the distances and sort the results
+    distances = 1 - predicted_features @ index_features.T
+    if distances.ndim == 3:
         # If there are multiple features per instance, we average.
-        similarities = similarities.mean(dim=1)
-    similarities = similarities.cpu()
-
-    if hdc_index_features is None:
-        positive_features = positive_features.to(device)
-        negative_features = negative_features.to(device)
-        positive_similarities = positive_features @ index_features.T
-        if positive_similarities.ndim == 3:
-            positive_similarities = positive_similarities.mean(dim=1)
-        negative_similarities = negative_features @ index_features.T
-        if negative_similarities.ndim == 3:
-            negative_similarities = negative_similarities.mean(dim=1)
-        positive_similarities = positive_similarities.cpu()
-        negative_similarities = negative_similarities.cpu()
-    else:
-        positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
-        negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
-
-    retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
-
-    sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
+        distances = distances.mean(dim=1)
+    sorted_indices = torch.argsort(distances, dim=-1).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
     # Delete the reference image from the results
@@ -231,33 +194,20 @@ def circo(
     Compute the retrieval metrics on the CIRCO validation set given the pseudo tokens and the reference names.
     Computes mAP@5, 10, 25 and 50. If test-split, generates submittable file.
     """
-    # Load the model
-    # Put on device.
-    index_features = index_features.to(device)
-    predicted_features = predicted_features.to(device)
+    if hdc_index_features is None:
+        # Load the model
+        # Put on device.
+        index_features = index_features.to(device)
+        predicted_features = predicted_features.to(device)
     
     ### Compute Test Submission in case of test split.
     if split == 'test':
         print('Generating test submission file!')
-        # Compute the Retrieval Score
-        similarities = predicted_features @ index_features.T
-        if similarities.ndim == 3:
+        similarity = predicted_features @ index_features.T
+        if similarity.ndim == 3:
             # If there are multiple features per instance, we average.
-            similarities = similarities.mean(dim=1)
-        if hdc_index_features is None:
-            positive_similarities = positive_features @ index_features.T
-            if positive_similarities.ndim == 3:
-                positive_similarities = positive_similarities.mean(dim=1)
-            negative_similarities = negative_features @ index_features.T
-            if negative_similarities.ndim == 3:
-                negative_similarities = negative_similarities.mean(dim=1)
-            retrieval_score = similarities + 0.7 * positive_similarities - 0.2 * negative_similarities
-        else:
-            positive_similarities = _hd_cosine_similarity_matrix(positive_features, hdc_index_features, device)
-            negative_similarities = _hd_cosine_similarity_matrix(negative_features, hdc_index_features, device)
-            retrieval_score = similarities.cpu() + 0.7 * positive_similarities - 0.2 * negative_similarities
-
-        sorted_indices = torch.argsort(retrieval_score, dim=-1, descending=True).cpu()
+            similarity = similarity.mean(dim=1)                    
+        sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
         sorted_index_names = np.array(index_names)[sorted_indices]
         # Return prediction dict to submit.
         queryid_to_retrieved_images = {
@@ -274,13 +224,28 @@ def circo(
     retrievals = [5, 10, 25, 50]
     recalls = {key: [] for key in retrievals}
     maps = {key: [] for key in retrievals}
+    
+    if hdc_index_features is not None:
+        hd_encoder = kwargs.get('hd_encoder')
+        if predicted_features.ndim == 3:
+            b, k, d = predicted_features.shape
+            predicted_hv = encode_index_features_hdc(predicted_features.view(-1, d), hd_encoder, output_device=device)
+            all_similarities = get_hd_similarity_matrix(predicted_hv, hdc_index_features.to(device))
+            all_similarities = all_similarities.view(b, k, -1).mean(dim=1).cpu()
+        else:
+            predicted_hv = encode_index_features_hdc(predicted_features, hd_encoder, output_device=device)
+            all_similarities = get_hd_similarity_matrix(predicted_hv, hdc_index_features.to(device)).cpu()
         
-    for predicted_feature, target_name, sub_targets in tqdm.tqdm(zip(predicted_features, target_names, targets), total=len(predicted_features), desc='Computing Metric.'):
+    for idx, (predicted_feature, target_name, sub_targets) in enumerate(tqdm.tqdm(zip(predicted_features, target_names, targets), total=len(predicted_features), desc='Computing Metric.')):
         sub_targets = np.array(sub_targets)[np.array(sub_targets) != '']  # remove trailing empty strings added for collate_fn
-        similarity = predicted_feature @ index_features.T
-        if similarity.ndim == 2:
-            # If there are multiple features per instance, we average.
-            similarity = similarity.mean(dim=0)
+        if hdc_index_features is not None:
+            similarity = all_similarities[idx]
+        else:
+            similarity = predicted_feature @ index_features.T
+            if similarity.ndim == 2:
+                # If there are multiple features per instance, we average.
+                similarity = similarity.mean(dim=0)
+            similarity = similarity.cpu()
         sorted_indices = torch.topk(similarity, dim=-1, k=50).indices.cpu()
         sorted_index_names = np.array(index_names)[sorted_indices]
         map_labels = torch.tensor(np.isin(sorted_index_names, sub_targets), dtype=torch.uint8)
