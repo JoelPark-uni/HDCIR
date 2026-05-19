@@ -96,7 +96,7 @@ def extract_image_features(device: torch.device, args: argparse.Namespace, datas
 def generate_predictions(
     device: torch.device, args: argparse.Namespace, clip_model: clip.model.CLIP, 
     blip_model: callable, blip_processor: callable, query_dataset: torch.utils.data.Dataset, 
-    preload_dict: Dict[str, Union[str,None]], **kwargs
+    preload_dict: Dict[str, Union[str,None]], intent_classifier=None, **kwargs
 ) -> Tuple[torch.Tensor, List[str], list]:
     """
     Generates features predictions for the validation set of CIRCO
@@ -109,6 +109,7 @@ def generate_predictions(
         all_captions, relative_captions = [], []
         gt_img_ids, query_ids = [], []
         target_names, reference_names = [], []
+        semantic_aspects_list = []
         
         query_loader = torch.utils.data.DataLoader(
             dataset=query_dataset, batch_size=batch_size, num_workers=8, 
@@ -146,6 +147,9 @@ def generate_predictions(
                     query_key = 'pair_id'
                 if query_key in batch:
                     query_ids.extend(batch[query_key])
+                    
+                if 'semantic_aspects' in batch:
+                    semantic_aspects_list.extend(batch['semantic_aspects'])
                         
             query_iterator.set_postfix_str(f'Batch size: {len(blip_images_pil)}')
                 
@@ -176,52 +180,145 @@ def generate_predictions(
                 'relative_captions': relative_captions,
                 'target_names': target_names,
                 'reference_names': reference_names,
-                'query_ids': query_ids
+                'query_ids': query_ids,
+                'semantic_aspects_list': semantic_aspects_list
             }
             pickle.dump(res_dict, open(preload_dict['captions'], 'wb'))
     else:
         print(f'Loading precomputed image captions from {preload_dict["captions"]}!')
         res_dict = pickle.load(open(preload_dict['captions'], 'rb'))
-        all_captions, gt_img_ids, relative_captions, target_names, reference_names, query_ids = res_dict.values()
-        
+        all_captions = res_dict['all_captions']
+        gt_img_ids = res_dict['gt_img_ids']
+        relative_captions = res_dict['relative_captions']
+        target_names = res_dict['target_names']
+        reference_names = res_dict['reference_names']
+        query_ids = res_dict['query_ids']
+        semantic_aspects_list = res_dict.get('semantic_aspects_list', [])
+        print(semantic_aspects_list)
     ### Modify Captions using LLM.
+    all_coarse_labels = []
     if preload_dict['mods'] is None or not os.path.exists(preload_dict['mods']):
         modified_captions = []
-        positive_captions = []
-        negative_captions = []
+        scene_captions = []
+        negation_captions = []
         base_prompt = eval(args.llm_prompt)
-        for i in tqdm.trange(len(all_captions), position=1, desc=f'Modifying captions with LLM...', leave=False):
+        llm_batch_size = max(1, getattr(args, 'llm_batch_size', 8))
+        prompts_to_query = []
+        from prompts import modular_prompts
+
+        predicted_intents = None
+        if intent_classifier is not None:
+            print("Predicting intents using HDClassifier...")
+            emb = get_text_embeddings(relative_captions, device)
+            with torch.no_grad():
+                logits = intent_classifier(emb)
+            threshold = args.hdclassifier_threshold
+            predicted_intents = apply_threshold_predictions(logits, threshold_offset=threshold).cpu()
+
+        for i in range(len(all_captions)):
             instruction = relative_captions[i]
             img_caption = all_captions[i]
-            final_prompt = base_prompt + '\n' + "Image Content: " + img_caption
-            final_prompt = final_prompt + '\n' + 'Instruction: '+ instruction
-            resp = openai_api.openai_completion(final_prompt)
-            #resp = llama_pipeline(final_prompt,temperature=0.6,top_p=0.9,max_length=800)[0]['generated_text']
-
-            ## extract edited description
-            resp = resp.split('\n')
-            description = ""
-            aug = False
-            for line in resp:                    
-                if line.strip().startswith('Edited Description:'):
-                    description = line.split(':')[1].strip()
-                    if description == "":
-                        modified_captions.append(relative_captions[i])
-                    else:
-                        modified_captions.append(description)
-                    aug = True
-                    break
-            if not aug:
-                modified_captions.append(relative_captions[i])   
+            final_prompt = base_prompt
+            coarse_labels = set()
+            
+            # Module for dataset using HDClassifier predictions
+            if intent_classifier is not None:
+                # Use pre-computed predicted_intents
+                predicted_labels = predicted_intents[i]
+                for idx, is_present in enumerate(predicted_labels):
+                    if is_present == 1.0:
+                        label = coarse_classes[idx]
+                        coarse_labels.add(label)
+                        if label in modular_prompts:
+                            final_prompt += "\n" + modular_prompts[label]
+            elif getattr(args, 'dataset', '').lower() in ['toy_circo', 'circo'] and i < len(semantic_aspects_list):
+                aspects = semantic_aspects_list[i]
+                from encoder import INTENT_MAP
+                if isinstance(aspects, list):
+                    for asp in aspects:
+                        if asp in INTENT_MAP:
+                            coarse_labels.add(INTENT_MAP[asp])
+                elif isinstance(aspects, str) and aspects in INTENT_MAP:
+                    coarse_labels.add(INTENT_MAP[aspects])
                 
+                for label in coarse_labels:
+                    if label in modular_prompts:
+                        final_prompt += "\n" + modular_prompts[label]
+
+            all_coarse_labels.append(coarse_labels)
+            # final_prompt = final_prompt + '\n' + prompts.formatting_prompt
+            final_prompt = final_prompt + '\n' + "Image Content: " + img_caption
+            final_prompt = final_prompt + '\n' + 'Instruction: ' + instruction
+            prompts_to_query.append(final_prompt)
+
+        for pmpt in prompts_to_query:
+            print(pmpt[len(base_prompt):])
+
+        for start_idx in tqdm.trange(0, len(prompts_to_query), llm_batch_size, position=1,
+                                     desc='Modifying captions with LLM...', leave=False):
+            end_idx = min(start_idx + llm_batch_size, len(prompts_to_query))
+            batch_prompts = prompts_to_query[start_idx:end_idx]
+
+            try:
+                batch_responses = openai_api.openai_completion_batch(batch_prompts, max_tokens=200)
+            except Exception:
+                batch_responses = [openai_api.openai_completion(p, max_tokens=200) for p in batch_prompts]
+
+            for local_idx, resp_text in enumerate(batch_responses):
+                global_idx = start_idx + local_idx
+                resp_text = resp_text.strip()
+                description = relative_captions[global_idx]
+
+                desc_match = re.search(r'Edited Description:\s*([^\n]*)', resp_text)
+                if desc_match:
+                    candidate = desc_match.group(1).strip()
+                    if candidate:
+                        description = candidate
+                modified_captions.append(description)
+
+                scene_desc = ""
+                if "SCENE" in all_coarse_labels[global_idx]:
+                    scene_match = re.search(r'Scene:\s*([^\n]*)', resp_text)
+                    if scene_match:
+                        s_desc = scene_match.group(1).strip()
+                        if s_desc:
+                            scene_desc = s_desc
+                scene_captions.append(scene_desc)
+                
+                negation_desc = ""
+                if "NEGATION" in all_coarse_labels[global_idx]:
+                    negation_match = re.search(r'Negatives:\s*([^\n]*)', resp_text)
+                    if negation_match:
+                        n_desc = negation_match.group(1).strip()
+                        if n_desc:
+                            negation_desc = n_desc
+                negation_captions.append(negation_desc)
+
         if preload_dict['mods'] is not None:
-            dump_dict = {'base_caption':all_captions, 'instruction':relative_captions, 'modified_captions': modified_captions, 'positive_captions': positive_captions, 'negative_captions': negative_captions}
+            dump_dict = {'base_caption':all_captions, 'instruction':relative_captions, 'modified_captions': modified_captions, 'all_coarse_labels': [list(c) for c in all_coarse_labels], 'scene_captions': scene_captions, 'negation_captions': negation_captions}
             json.dump(dump_dict, open(preload_dict['mods'], 'w'), indent=6)
     else:
         print(f'Loading precomputed caption modifiers from {preload_dict["mods"]}!')
-        modified_captions = json.load(open(preload_dict['mods'], 'r'))['modified_captions']
-        positive_captions = json.load(open(preload_dict['mods'], 'r'))['positive_captions']
-        negative_captions = json.load(open(preload_dict['mods'], 'r'))['negative_captions']
+        mods_data = json.load(open(preload_dict['mods'], 'r'))
+        modified_captions = mods_data['modified_captions']
+        scene_captions = mods_data.get('scene_captions', [])
+        negation_captions = mods_data.get('negation_captions', [])
+        if 'all_coarse_labels' in mods_data:
+            all_coarse_labels = [set(c) for c in mods_data['all_coarse_labels']]
+        else:
+            # fallback
+            all_coarse_labels = []
+            for i in range(len(all_captions)):
+                coarse_labels = set()
+                if getattr(args, 'dataset', '').lower() in ['toy_circo', 'circo'] and i < len(semantic_aspects_list):
+                    from encoder import INTENT_MAP
+                    aspects = semantic_aspects_list[i]
+                    if isinstance(aspects, list):
+                        for asp in aspects:
+                            if asp in INTENT_MAP: coarse_labels.add(INTENT_MAP[asp])
+                    elif isinstance(aspects, str) and aspects in INTENT_MAP:
+                        coarse_labels.add(INTENT_MAP[aspects])
+                all_coarse_labels.append(coarse_labels)
                  
     ### Perform text-to-image retrieval based on the modified captions.
     predicted_features, positive_features, negative_features = text_encoding(
@@ -245,7 +342,11 @@ def generate_predictions(
         'query_ids': query_ids,
         'start_captions': all_captions,
         'modified_captions': modified_captions,
-        'instructions': relative_captions
+        'scene_captions': scene_captions,
+        'negation_captions': negation_captions,
+        'instructions': relative_captions,
+        'coarse_labels': all_coarse_labels,
+        'semantic_aspects_list': semantic_aspects_list
     }
     
     
@@ -387,6 +488,7 @@ def evaluate_genecis(device: torch.device, args: argparse.Namespace, clip_model:
 
         return meters
 
+    
     
 def _tokenize_captions(clip_model, captions: List[str], device: torch.device) -> torch.Tensor:
     if hasattr(clip_model, 'tokenizer'):
@@ -549,3 +651,56 @@ prompt_ensemble = [
     'A photo of a small {}',
     'A tattoo of the {}',
 ]
+
+import json
+from encoder import HDClassifier, INTENT_MAP, coarse_classes, apply_threshold_predictions
+
+def get_text_embeddings(captions, device, batch_size=128):
+    from sentence_transformers import SentenceTransformer
+    model = SentenceTransformer("sentence-transformers/all-mpnet-base-v2", device=device.type)
+    embeddings = model.encode(captions, batch_size=batch_size, convert_to_tensor=True, 
+                             device=device.type, show_progress_bar=False)
+    text_embeddings = (embeddings / embeddings.norm(dim=-1, keepdim=True)).cpu()
+    return text_embeddings
+
+def train_intent_classifier(train_dataset, device):
+    print("Training intent classifier...")
+    # Get all captions and labels from the train dataset
+    captions = []
+    labels_list = []
+    
+    # Iterate through dataset to collect captions and semantic labels
+    # train_dataset is ToyCIRCODataset
+    for i in range(len(train_dataset)):
+        # CIRCO dataset returns dictionary from __getitem__ in some implementations,
+        # but let's just access annotations directly.
+        ann = train_dataset.annotations[i]
+        captions.append(ann['relative_caption'])
+        
+        aspects = ann.get('semantic_aspects', [])
+        # Convert to coarse labels
+        coarse_labels = set()
+        if isinstance(aspects, list):
+            for asp in aspects:
+                if asp in INTENT_MAP:
+                    coarse_labels.add(INTENT_MAP[asp])
+        elif isinstance(aspects, str) and aspects in INTENT_MAP:
+            coarse_labels.add(INTENT_MAP[aspects])
+            
+        # Create one-hot label vector
+        label_vec = torch.zeros(len(coarse_classes), dtype=torch.float32)
+        for cl in coarse_labels:
+            if cl in coarse_classes:
+                label_vec[coarse_classes.index(cl)] = 1.0
+        labels_list.append(label_vec)
+        
+    embeddings = get_text_embeddings(captions, device)
+    labels = torch.stack(labels_list)
+    
+    # Train HDClassifier
+    classifier = HDClassifier(aspect_dim=embeddings.shape[1], num_classes=len(coarse_classes), seed=260309, device=device)
+    classifier.train_proto(embeddings, labels)
+    
+    print("Intent classifier training complete.")
+    return classifier
+

@@ -208,11 +208,23 @@ Negative: small wooden house, house next to man
 "viewpoint"
 Image Content: A picture of a salad bowl.
 Instruction: Change the perspective to a bird's-eye view.
-Edited Description: A salad bowl viewed from above.
-Positive: salad bowl, top-down view
-Negative: side view perspective
+Edited Description: A salad bowl viewed from above. 
 
-The edited description needs to be as simple as possible. Avoid adding imaginary things. Keep the edited description as short as possible. More examples:
+
+The edited description needs to be as simple as possible. The instruction does not need to explicitly indicate which
+type it is. Avoid adding imaginary things. Each time generate one instruction and one edited description only. Keep the edited description as short as possible. Here are some more examples for reference:
+
+Image Content: the men are holding a large fish on a stick
+Instruction: People watch behind the fences of animals in the center.
+Edited Description: people, a bull, a crowd, a fence, a ring, a bull, a ring, a
+
+Image Content: a man in a blue robe is adjusting a man in a blue robe
+Instruction: Change the gowns to black with a navy blue collar
+Edited Description: a woman in a cap and gown is standing in front of a group of people
+
+Image Content: people, sled dogs, snow, sled, sled dogs, sled, sled dogs, sled
+Instruction: Dog led sled moves in front of another person behind it in the snow.
+Edited Description: a man is pulling a sled full of huskies down a snowy trail
 
 Image Content: the legend of zelda ocarina of time t-shirt
 Instruction: is green and a graphic on it and is green
@@ -279,8 +291,12 @@ Negative: none
 Image Content: A plane flying in the cloudy sky.
 Instruction: Remove the clouds from the sky.
 Edited Description: A plane flying in the clear sky.
-Positive: plane, clear sky
-Negative: clouds
+Negatives: clouds
+
+"direct addressing"
+Image Content: The eiffel tower on a summer day.
+Instruction: Highlight the eiffel tower with a red circle.
+Edited Description: The eiffel tower, highlighted with a red circle, on a summer day.
 
 "compare & change"
 Image Content: The panda bear is sitting in the grass eating bamboo
@@ -300,10 +316,24 @@ Negative: red t-shirt
 Image Content: A man standing on a sled pulled by several sled dogs, next to a small wooden house.
 Instruction: Place the house behind the man, and make it much larger.
 Edited Description: A man standing on a sled pulled by several sled dogs, in front of a large wooden house.
-Positive: man on a sled, large wooden house, background house
-Negative: small wooden house, house next to man
+Scene: background, large wooden house
 
-The edited description needs to be as simple as possible. Avoid adding imaginary things. Keep the edited description as short as possible. Here are more fashion-specific examples:
+"viewpoint"
+Image Content: A picture of a salad bowl.
+Instruction: Change the perspective to a bird's-eye view.
+Edited Description: A salad bowl viewed from above. 
+Scene: bird's-eye view, from above
+
+The edited description needs to be as simple as possible. The instruction does not need to explicitly indicate which
+type it is. Avoid adding imaginary things. Each time generate one instruction and one edited description. Keep the edited description as short as possible. Here are some more examples for reference:
+
+Image Content: the man is wearing a white tank top and black shorts
+Instruction: looks faded and cheaper and is longer
+Edited Description: The man is wearing a faded, cheap-looking and elongated white tank top, giving a worn-out slightly oversized and more casual appearance.
+
+Image Content: the only winning move is not to play t shirt
+Instruction: The shirt is black with a skeleton and is red
+Edited Description: The image shows a black t-shirt with a red skeleton design on it. Is says "the only winning move is not to play".
 
 Image Content: the man is wearing a black polo shirt
 Instruction: is less formal with less buttons and is gray with no collar
@@ -320,48 +350,40 @@ Negative: yellow tank top
 Image Content: black and yellow hawaiian floral print sleeveless hawaiian 
 Instruction: Sexier and no vibrant colors and less revealing chest and more evening wear
 Edited Description: the dress is a black and green dress with a sleeveless bodice and a flared skirt
-Positive: black and green dress, sleeveless bodice, flared skirt
-Negative: yellow color, hawaiian floral print, revealing chest
 '''
 
+# # v1
+# modular_prompts = {
+#     "NEGATION": "Note: The instruction implies a NEGATION. Modify the description by considering the exclusion or removal of certain content.",
+#     "EXPLICIT_ATTRIBUTE": "Note: The instruction implies an EXPLICIT_ATTRIBUTE change (such as addition, direct addressing, or comparing changes). Prioritize explicitly adapting to these direct features.",
+#     "SCENE": "Note: The instruction implies a SCENE modification (such as spatial relations, background, or viewpoint). Consider adjusting the spatial and scene framing in the description accordingly.",
+#     "RELATIVE_MODIFICATION": "Note: The instruction implies a RELATIVE_MODIFICATION (such as a comparative statement or cardinality). Consider altering numeric values, ratios, or comparisons carefully."
+# }
 
-easy_modifier_prompt_fashion = '''
-I have an image of a fashion item. Given an instruction to edit the image, you must strictly identify the positive and negative attributes FIRST, and then generate a concise description of the edited image.
+# v2
+# modular_prompts = {
+#     "NEGATION": "Note: The instruction implies a NEGATION. Modify the 'Edited Description:' by excluding the negative content. Additionally, you MUST add exactly one new line starting with 'Negatives: ' followed by just the specific objects being removed as brief, comma-separated keywords. Do not use full sentences.",
+#     "EXPLICIT_ATTRIBUTE": "Note: The instruction implies an EXPLICIT_ATTRIBUTE change (such as addition, direct addressing, or comparing changes). Prioritize explicitly adapting to these direct features.",
+#     "SCENE": "Note: The instruction implies a SCENE modification. Adjust the spatial and scene framing in the 'Edited Description:'. Additionally, you MUST add exactly one new line starting with 'Scene: ' followed by just the specific background elements, spatial locations, or viewpoints being changed as brief, comma-separated keywords. Do not use full sentences.",
+#     "RELATIVE_MODIFICATION": "Note: The instruction implies a RELATIVE_MODIFICATION (such as a comparative statement or cardinality). Consider altering numeric values, ratios, or comparisons carefully."
+# }
 
-CRITICAL RULE FOR NEGATION:
-If the instruction implies removing an attribute, DO NOT put negative words in the Positive list. Instead, extract the base visual noun and put it strictly in the Negative list.
+# v3
+modular_prompts = {
+    "NEGATION": "Note: The instruction implies a NEGATION. Modify the description by considering the exclusion or removal of certain content.\n[System Task]: AFTER generating the natural 'Edited Description:', append a new line starting exactly with 'Negatives: ' followed by comma-separated keywords of the removed items.",
+    
+    "SCENE": "Note: The instruction implies a SCENE modification (such as spatial relations, background, or viewpoint). Consider adjusting the spatial and scene framing in the description accordingly.\n[System Task]: AFTER generating the natural 'Edited Description:', append a new line starting exactly with 'Scene: ' followed by comma-separated keywords of the background or viewpoint.",
+    
+    "EXPLICIT_ATTRIBUTE": "Note: The instruction implies an EXPLICIT_ATTRIBUTE change (such as addition, direct addressing, or comparing changes). Prioritize explicitly adapting to these direct features.",
+    
+    "RELATIVE_MODIFICATION": "Note: The instruction implies a RELATIVE_MODIFICATION (such as a comparative statement or cardinality). Consider altering numeric values, ratios, or comparisons carefully."
+}
 
-Follow these steps strictly:
-1. Positive: Identify parts that will appear in the edited image (newly added or kept from the original). Use simple noun phrases separated by commas. (Absolutely no negative words like 'no', 'without', 'less').
-2. Negative: Identify parts that no longer appear (removed or replaced from the original). Use simple noun phrases separated by commas.
-3. Edited Description: Generate a short, factual description of the edited item using ONLY the positive attributes. Avoid adding imaginary things not mentioned in the instruction.
+formatting_prompt = '''
+**REQUIRED OUTPUT FORMAT:**
+Assemble your final response exactly in the structure below. Do not add the optional lines unless their specific rules are triggered.
 
-I will put my image content beginning with “Image Content:”. The instruction I provide will begin with “Instruction:".
-Each time generate one Positive, one Negative, and one Edited Description only.
-
-Examples:
-
-Image Content: the man is wearing a red t - shirt
-Instruction: is solid white and is a lighter color
-Positive: solid white t-shirt, lighter color
-Negative: red t-shirt
-Edited Description: The man is wearing a solid white t-shirt.
-
-Image Content: the man is wearing a black polo shirt
-Instruction: is less formal and is gray with no collar
-Positive: gray polo shirt
-Negative: black polo shirt, collar, formal style
-Edited Description: The man is wearing a gray polo shirt.
-
-Image Content: a woman in a blue and white dress
-Instruction: its solid blue with higher neckline
-Positive: solid blue dress, higher neckline
-Negative: white color, lower neckline
-Edited Description: A woman in a solid blue dress with a higher neckline.
-
-Image Content: black and yellow hawaiian floral print dress
-Instruction: no vibrant colors and less revealing chest and more evening wear
-Positive: black evening wear dress
-Negative: yellow color, hawaiian floral print, vibrant colors, revealing chest
-Edited Description: A black evening wear dress.
+Edited Description: [A single, natural language sentence incorporating all changes]
+Scene: [Comma-separated keywords. Add this line ONLY IF a SCENE modification is implied]
+Negatives: [Comma-separated keywords. Add this line ONLY IF a NEGATION is implied]
 '''

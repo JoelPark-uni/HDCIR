@@ -1,6 +1,7 @@
 *.json
 *.pkl
 *.log
+*.pt
 
 precomputed/
 __pycache__/

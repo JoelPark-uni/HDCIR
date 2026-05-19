@@ -34,15 +34,15 @@ def collate_fn(batch):
         
         for key in keys:
             values = [d[key] for d in batch]
-            # Check if values are PIL images
-            if len(values) > 0 and isinstance(values[0], PIL.Image.Image):
-                # Keep PIL images as list
+            # Check if values are PIL images or specific keys that shouldn't be collated
+            if (len(values) > 0 and isinstance(values[0], PIL.Image.Image)) or key == 'semantic_aspects':
+                # Keep PIL images and textual list fields as list
                 collated[key] = values
             else:
                 # Use default collate for other types
                 try:
                     collated[key] = torch.utils.data.dataloader.default_collate(values)
-                except TypeError:
+                except Exception:
                     # If default_collate fails, keep as list
                     collated[key] = values
         return collated

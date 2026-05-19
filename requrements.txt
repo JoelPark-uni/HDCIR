@@ -52,7 +52,6 @@ fairscale==0.4.4
 fastjsonschema==2.21.2
 filelock==3.20.3
 fire==0.6.0
-flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.5.5/flash_attn-2.5.5%2Bcu122torch2.1cxx11abiFALSE-cp311-cp311-linux_x86_64.whl#sha256=bfbfbe77b1eb16338cf06fd859c0c3aee132168d479acf45c9ef04c94344b57e
 flatbuffers==25.2.10
 fonttools==4.58.4
 frozenlist==1.7.0

@@ -106,3 +106,49 @@ def get_hd_similarity_matrix(query_hv: torch.Tensor, index_hv: torch.Tensor, dev
         output_rows.append(torch.cat(row_chunks, dim=-1))
     return torch.cat(output_rows, dim=0)
 
+
+import torch.nn as nn
+
+INTENT_MAP = {
+    "negation": "NEGATION",
+    "addition": "EXPLICIT_ATTRIBUTE",
+    "direct_addressing": "EXPLICIT_ATTRIBUTE",
+    "compare_change": "EXPLICIT_ATTRIBUTE",
+    "spatial_relations_background": "SCENE",
+    "viewpoint": "SCENE",
+    "comparative_statement": "RELATIVE_MODIFICATION",
+    "cardinality": "RELATIVE_MODIFICATION"
+}
+
+coarse_classes = sorted(list(set(INTENT_MAP.values())))
+
+class HDClassifier(nn.Module):
+    def __init__(self, aspect_dim: int, hd_dim: int = 10000, num_classes: int = 4, seed: int = None, device='cpu'):
+        super().__init__()
+        if seed is not None:
+            torch.manual_seed(seed)
+        self.device = device
+        self.hd_proj = torchhd.MAPTensor.random(aspect_dim, hd_dim).to(device)
+        self.hd_proto = torchhd.MAPTensor.empty(num_classes, hd_dim).zero_().to(device)
+    
+    def train_proto(self, aspect_vecs, labels):
+        aspect_vecs = aspect_vecs.to(self.device)
+        labels = labels.to(self.device)
+        hd_vecs = (aspect_vecs @ self.hd_proj).normalize()
+        for i in range(len(self.hd_proto)):
+            class_vecs = hd_vecs[labels[:, i] == 1.0]
+            if len(class_vecs) > 0:
+                self.hd_proto[i] += torchhd.multibundle(class_vecs)
+        self.hd_proto = self.hd_proto.normalize()
+    
+    def forward(self, aspect_vecs):
+        aspect_vecs = aspect_vecs.to(self.device)
+        hd_vecs = (aspect_vecs @ self.hd_proj).normalize()
+        return torchhd.hamming_similarity(hd_vecs, self.hd_proto)
+
+def apply_threshold_predictions(logits, threshold_offset=20.0):
+    """Apply threshold to predictions."""
+    mean_sim = logits.float().mean(dim=1, keepdim=True)
+    preds = (logits >= mean_sim + threshold_offset).float()
+    
+    return preds

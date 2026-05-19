@@ -1,4 +1,5 @@
 import os
+import random
 from typing import List, Dict
 
 import argparse
@@ -17,10 +18,22 @@ import prompts
 import utils
 
 
+def seed_everything(seed=42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+
 def main():
     ### Load Input Arguments.
     parser = argparse.ArgumentParser()
     # Base Arguments
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     parser.add_argument("--exp-name", type=str, help="Experiment to evaluate")
     parser.add_argument("--device", type=int, default=0, 
                         help="GPU ID to use.")
@@ -38,12 +51,12 @@ def main():
     #################################################################################################################
     # Dataset Arguments ['dress', 'toptee', 'shirt']
     parser.add_argument("--dataset", type=str, required=True, 
-                        choices=['cirr', 'circo',
+                        choices=['cirr', 'circo', 'toy_circo',
                                  'fashioniq_dress', 'fashioniq_toptee', 'fashioniq_shirt',
                                  'toyfashion_iq',
                                  'genecis_change_attribute', 'genecis_change_object', 'genecis_focus_attribute', 'genecis_focus_object'],
                         help="Dataset to use")
-    parser.add_argument("--split", type=str, default='val', choices=['val', 'test'],
+    parser.add_argument("--split", type=str, default='val', choices=['train', 'val', 'test'],
                         help='Dataset split to evaluate on. Some datasets require special testing protocols s.a. cirr/circo.')
     parser.add_argument("--dataset-path", type=str, required=True,
                         help="Path to the dataset")
@@ -52,6 +65,28 @@ def main():
     available_prompts = [f'prompts.{x}' for x in prompts.__dict__.keys() if '__' not in x]
     parser.add_argument("--llm_prompt", default='prompts.simple_modifier_prompt', type=str, choices=available_prompts,
                         help='Denotes the base prompt to use to probe the LLM. Has to be available in prompts.py')
+    
+    parser.add_argument("--use_hdc", action="store_true", help="Use HDC to compute similarities")
+    parser.add_argument("--HD_DIM", default=10000, type=int, help="Hypervector Dimension")
+    parser.add_argument("--use_hdclassifier", action="store_true", help="Use intent-based HD modifications with a trained HDClassifier (only for toy_circo dataset for now).")
+    parser.add_argument("--hdclassifier_threshold", default=50.0, type=float, help="Threshold offset for intent classifier predictions when using intent-based HD modifications.")
+
+    parser.add_argument("--use_splice", action="store_true", help="Enable SPLiCE concept decomposition logic.")
+    parser.add_argument("--splice_vocab_path", default='/workspace/joel/HDCIR/SpLiCE/data/vocab/laion.txt', type=str, help="Path for vocabulary to use with SPLiCE.")
+    parser.add_argument("--db_img_dir", type=str,
+                        default='/workspace/joel/CIRCO/COCO2017_unlabeled/unlabeled2017',
+                        help="Directory of images used when auto-extracting precomputed/db_embeddings_<tag>.pkl.")
+    parser.add_argument("--db_batch_size", type=int, default=64,
+                        help="Batch size used during auto DB extraction.")
+
+    parser.add_argument("--active-intents", nargs='+', type=str, default=[],
+                        choices=['negation', 'addition', 'direct_addressing', 'compare_change', 'spatial_relations_background', 'viewpoint', 'comparative_statement', 'cardinality'],
+                        help="List of intents to apply custom similarity weighting in intent_experiment.")
+
+    parser.add_argument("--cache-path", type=str, default=None,
+                        help="If set, intent_experiment dumps per-query similarity components (pred/inst/ref/hd) "
+                             "to this .pt path for offline weight tuning (see 008_weight_search.ipynb).")
+
     #################################################################################################################
 
     parser.add_argument("--weight-path", type=str, default='',
@@ -70,6 +105,8 @@ def main():
                         help='List of negative similarity weights for sweep in FIQ (e.g. 0.05 0.1 0.2).')
     args = parser.parse_args()
 
+    # Set seed
+    seed_everything(args.seed)
 
     ### Set Device.
     termcolor.cprint(f'Starting evaluation on {args.dataset.upper()} (split: {args.split})\n', color='green', attrs=['bold'])
@@ -77,15 +114,15 @@ def main():
 
 
     ### Argument Checks.
-    preload_dict = {key: None for key in ['img_features', 'captions', 'mods']}
-    preload_str = f'{args.dataset}_cirevl_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')    
-        
+    preload_dict = {key: None for key in ['img_features', 'captions', 'mods', 'hd_index_features', 'db_embeddings']}
+    preload_str = f'{args.dataset}_cirevl_{args.blip}_{args.clip}_{args.split}'.replace('/', '-')
+
     if len(args.preload):
-        os.makedirs('precomputed', exist_ok=True)    
+        os.makedirs('precomputed', exist_ok=True)
     if 'img_features' in args.preload:
         # # CLIP embeddings only have to be computed when CLIP model changes.
         # img_features_load_str = f'{args.dataset}_{args.clip}_{args.split}'.replace('/', '-')    
-        preload_dict['img_features'] = os.path.join('precomputed', preload_str + '_img_features.pkl')
+        preload_dict['img_features'] = os.path.join('precomputed', preload_str + f'_{args.preprocess_type}' +'_img_features.pkl')
     
     if 'captions' in args.preload:
         # # BLIP captions only have to be computed when BLIP model or BLIP prompt changes.
@@ -97,7 +134,7 @@ def main():
             
     if 'mods' in args.preload:
         # # LLM-based caption modifications have to be queried only when BLIP model or BLIP prompt changes.
-        mod_load_str = f'{args.dataset}_{args.blip}_{args.split}'.replace('/', '-')    
+        mod_load_str = f'{args.exp_name}_{args.dataset}_cirevl_{args.blip}_{args.split}'.replace('/', '-')    
         preload_dict['mods'] = os.path.join('precomputed', mod_load_str + f'_mods_{args.llm_prompt.split(".")[-1]}.json')
     
     if args.use_hdc and len(args.preload):
@@ -107,8 +144,21 @@ def main():
         )
 
     if args.split == 'test':
-        preload_dict['test'] = preload_str + f'{args.exp_name}_{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'
+        preload_dict['test'] = preload_str + f'{args.blip_prompt.split(".")[-1]}_{args.llm_prompt.split(".")[-1]}_test_submission.json'
+
+    # DB embeddings (image_mean source for targetpad_centered SPLiCE).
+    # Backbone-specific only — does NOT depend on dataset/blip/split.
+    # We always register a default path so the load-or-build logic below is uniform.
+    import sys as _sys
+    _sys.path.insert(0, '/workspace/joel/HDCIR')
+    from hdc_splice import (
+        ensure_db_embeddings, load_db_image_means,
+        resolve_model_tag, default_db_path,
+    )
+    _tag = resolve_model_tag(args.clip)
+    preload_dict['db_embeddings'] = os.path.join('precomputed', f'db_embeddings_{_tag}.pkl')
     
+            
     ### Load CLIP model, BLIP model & Preprocessing.    
     print(f'Loading CLIP {args.clip}... ', end='')
           
@@ -143,6 +193,20 @@ def main():
     elif args.preprocess_type == 'clip':
         print('CLIP preprocess pipeline is used.')
         preprocess = clip_preprocess
+
+    # When TargetPad preprocessing is enabled (and SPLiCE will run), produce/find
+    # the backbone-tagged DB embedding pickle so compute_results can load the
+    # image_mean used by the targetpad_centered SPLiCE recipe.
+    # Only `precomputed/db_embeddings_<tag>.pkl` is considered — if missing, extract.
+    if args.preprocess_type == 'targetpad' and args.use_splice:
+        db_emb_path = preload_dict['db_embeddings']
+        os.makedirs(os.path.dirname(db_emb_path) or '.', exist_ok=True)
+        ensure_db_embeddings(
+            clip_model, preprocess, device,
+            clip_model=args.clip, img_dir=args.db_img_dir,
+            db_emb_path=db_emb_path, batch_size=args.db_batch_size,
+        )
+        args.db_emb_path = db_emb_path  # forward into compute_results via args
         
     print(f'Loading BLIP2 {args.blip}... ', end='')
 
@@ -200,8 +264,22 @@ def main():
     elif args.dataset.lower() == 'circo':
         target_datasets.append(datasets.CIRCODataset(args.dataset_path, args.split, 'classic', preprocess))
         query_datasets.append(datasets.CIRCODataset(args.dataset_path, args.split, 'relative', preprocess))
-        compute_results_function = compute_results.circo
+        # compute_results_function = compute_results.circo
+        compute_results_function = compute_results.intent_experiment
         pairings.append('default')
+
+    elif args.dataset.lower() == 'toy_circo':
+        target_datasets.append(datasets.ToyCIRCODataset(args.dataset_path, args.split, 'classic', preprocess))
+        query_datasets.append(datasets.ToyCIRCODataset(args.dataset_path, args.split, 'relative', preprocess))
+        compute_results_function = compute_results.intent_experiment
+        pairings.append('default')
+        
+        if args.use_hdclassifier:
+            # Train intent classifier on 'train' split if needed
+            print("Initializing HDClassifier and training on 'train' split for toy_circo dataset")
+            train_dataset = datasets.ToyCIRCODataset(args.dataset_path, 'train', 'relative', preprocess)
+            intent_classifier = utils.train_intent_classifier(train_dataset, device)
+            intent_classifier.eval()
     
     elif 'genecis' in args.dataset.lower():   
         prop_file = '_'.join(args.dataset.lower().split('_')[1:])
@@ -228,9 +306,9 @@ def main():
             'args': args, 'query_dataset': query_dataset, 'target_dataset': target_dataset, 'clip_model': clip_model, 
             'blip_model': blip_model, 'blip_processor': blip2_processor, 'preprocess': preprocess, 'device': device, 'split': args.split,
             'preload_dict': preload_dict,
-            'positive_sim_weights': args.positive_sim_weights,
-            'negative_sim_weights': args.negative_sim_weights,
-        }    
+        }
+        if args.dataset.lower() == 'toy_circo' and 'intent_classifier' in locals():
+            input_kwargs['intent_classifier'] = intent_classifier    
         
         ### Compute Target Image Features
         print(f'Extracting target image features using CLIP: {args.clip}.')

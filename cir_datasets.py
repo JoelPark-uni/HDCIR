@@ -354,6 +354,7 @@ class CIRCODataset(Dataset):
             # Get relative caption and shared concept
             relative_caption = self.annotations[index]['relative_caption']
             shared_concept = self.annotations[index]['shared_concept']
+            semantic_aspects = self.annotations[index].get("semantic_aspects", [])
 
             # Get the reference image
             reference_img_id = str(self.annotations[index]['reference_img_id'])
@@ -381,6 +382,7 @@ class CIRCODataset(Dataset):
                     'shared_concept': shared_concept,
                     'gt_img_ids': gt_img_ids,
                     'query_id': query_id,
+                    'semantic_aspects': semantic_aspects,
 
                 }
 
@@ -392,6 +394,7 @@ class CIRCODataset(Dataset):
                     'shared_concept': shared_concept,
                     'query_id': query_id,
                     'blip_ref_img_pil': blip_ref_img_pil,
+                    'semantic_aspects': semantic_aspects,
                 }
 
         elif self.mode == 'classic':
@@ -418,8 +421,45 @@ class CIRCODataset(Dataset):
             raise ValueError("mode should be in ['relative', 'classic']")
 
 
+
+class ToyCIRCODataset(CIRCODataset):
+    def __init__(self, dataset_path: Union[str, Path], split: Literal['train', 'val'],
+                 mode: Literal['relative', 'classic'], preprocess: callable):
+        dataset_path = Path(dataset_path)
+        self.mode = mode
+        self.split = split
+        self.preprocess = preprocess
+        self.data_path = dataset_path
+
+        if mode not in ['relative', 'classic']:
+            raise ValueError("mode should be in ['relative', 'classic']")
+        if split not in ['train', 'val']:
+            raise ValueError("split should be in ['train', 'val']")
+
+        with open(dataset_path / 'COCO2017_unlabeled' / "annotations" / "image_info_unlabeled2017.json", "r") as f:
+            imgs_info = json.load(f)
+
+        self.img_paths = [dataset_path / 'COCO2017_unlabeled' / "unlabeled2017" / img_info["file_name"] for img_info in
+                          imgs_info["images"]]
+        self.img_ids = [img_info["id"] for img_info in imgs_info["images"]]
+        self.img_ids_indexes_map = {str(img_id): i for i, img_id in enumerate(self.img_ids)}
+
+        with open(dataset_path / 'annotations' / f'toy_{split}.json', "r") as f:
+            self.annotations: List[dict] = json.load(f)
+
+        self.max_num_gts = 23
+        print(f"ToyCIRCODataset {split} dataset in {mode} mode initialized")
+
+    def __getitem__(self, index) -> dict:
+        item = super().__getitem__(index)
+        if self.mode == 'relative':
+            semantic_aspects = self.annotations[index].get("semantic_aspects", [])
+            item['semantic_aspects'] = semantic_aspects
+        return item
+
 #####################################
 ### GENECIS-relevant Dataloaders.
+
 
 class COCODataset(Dataset):
 
